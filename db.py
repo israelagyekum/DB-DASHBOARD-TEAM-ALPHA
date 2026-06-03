@@ -189,6 +189,9 @@ _COL_MAP: dict[str, str] = {
     'outstanding': 'Outstanding',          'count': 'Count',
     'fullname': 'FullName',                'coursename': 'CourseName',
     'grade': 'Grade',                      'avgmark': 'AvgMark',
+    # Admin panel aliases
+    'totalpaid': 'TotalPaid',              'totalbalance': 'TotalBalance',
+    'numpayments': 'NumPayments',          'numsections': 'NumSections',
 }
 
 

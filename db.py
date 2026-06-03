@@ -134,16 +134,82 @@ def _reset_identity_sequences(con) -> None:
             pass
 
 
+# ── Column-name normalisation ─────────────────────────────────────────────────
+# PostgreSQL folds all unquoted identifiers to lowercase, so every column name
+# comes back lowercase from pd.read_sql_query().  DuckDB preserves the original
+# DDL case.  This map converts the lowercase Postgres names back to the
+# CamelCase names used throughout the app, and is also applied to DuckDB results
+# so that lowercase query aliases (e.g. "AS students") become "Students" in both
+# engines.  Keys are always lowercase; values are the expected Python-side names.
+_COL_MAP: dict[str, str] = {
+    # Schema columns — Department
+    'departmentid': 'DepartmentID',       'departmentname': 'DepartmentName',
+    'faculty': 'Faculty',                  'officelocation': 'OfficeLocation',
+    # Schema columns — Programme
+    'programmeid': 'ProgrammeID',          'programmecode': 'ProgrammeCode',
+    'programmename': 'ProgrammeName',      'degreetype': 'DegreeType',
+    'durationyears': 'DurationYears',
+    # Schema columns — Course
+    'courseid': 'CourseID',                'coursecode': 'CourseCode',
+    'coursetitle': 'CourseTitle',          'credithours': 'CreditHours',
+    # Schema columns — Lecturer
+    'lecturerid': 'LecturerID',            'lecturername': 'LecturerName',
+    'rank': 'Rank',                        'email': 'Email',
+    # Schema columns — Semester
+    'semesterid': 'SemesterID',            'semestername': 'SemesterName',
+    'startdate': 'StartDate',              'enddate': 'EndDate',
+    # Schema columns — Student
+    'studentid': 'StudentID',              'firstname': 'FirstName',
+    'lastname': 'LastName',                'gender': 'Gender',
+    'dateofbirth': 'DateOfBirth',          'phonenumber': 'PhoneNumber',
+    'admissionyear': 'AdmissionYear',      'status': 'Status',
+    # Schema columns — Admission
+    'admissionid': 'AdmissionID',          'applicantname': 'ApplicantName',
+    'admissiondate': 'AdmissionDate',      'admissionstatus': 'AdmissionStatus',
+    # Schema columns — CourseOffering
+    'courseofferingid': 'CourseOfferingID','academicyear': 'AcademicYear',
+    # Schema columns — Enrollment
+    'enrollmentid': 'EnrollmentID',        'enrollmentdate': 'EnrollmentDate',
+    'enrollmentstatus': 'EnrollmentStatus',
+    # Schema columns — AssessmentResult
+    'resultid': 'ResultID',                'courseworkscore': 'CourseworkScore',
+    'examscore': 'ExamScore',              'finalgrade': 'FinalGrade',
+    # Schema columns — FeePayment
+    'paymentid': 'PaymentID',              'amountpaid': 'AmountPaid',
+    'paymentdate': 'PaymentDate',          'paymentmethod': 'PaymentMethod',
+    'balance': 'Balance',
+    # Schema columns — LMSActivity
+    'activityid': 'ActivityID',            'logintimestamp': 'LoginTimestamp',
+    'activitytype': 'ActivityType',        'durationminutes': 'DurationMinutes',
+    # Query aliases used in app.py charts / tables
+    'students': 'Students',                'enrollments': 'Enrollments',
+    'results': 'Results',                  'events': 'Events',
+    'minutes': 'Minutes',                  'total': 'Total',
+    'payments': 'Payments',                'paid': 'Paid',
+    'outstanding': 'Outstanding',          'count': 'Count',
+    'fullname': 'FullName',                'coursename': 'CourseName',
+    'grade': 'Grade',                      'avgmark': 'AvgMark',
+}
+
+
+def _fix_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Rename DataFrame columns to their expected CamelCase form."""
+    df.columns = [_COL_MAP.get(c.lower(), c) for c in df.columns]
+    return df
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def q(sql: str) -> pd.DataFrame:
     """
-    Execute a read-only SQL query and return a DataFrame.
+    Execute a read-only SQL query and return a DataFrame with normalised column names.
     Cached for 30 seconds; cleared immediately after any admin write.
     """
     kind, conn = get_connection()
     if kind == "postgres":
-        return pd.read_sql_query(sql, conn)
-    return conn.execute(sql).fetchdf()
+        df = pd.read_sql_query(sql, conn)
+    else:
+        df = conn.execute(sql).fetchdf()
+    return _fix_columns(df)
 
 
 def run_write(sql: str) -> None:

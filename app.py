@@ -134,11 +134,11 @@ if get_connection()[0] == "duckdb":
 kpi = q(kpi_sql).iloc[0]
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("👥 Students", f"{int(kpi['students']):,}")
-c2.metric("📚 Enrollments", f"{int(kpi['enrollments']):,}")
-c3.metric("📝 Graded results", f"{int(kpi['results']):,}")
+c1.metric("👥 Students", f"{int(kpi['Students']):,}")
+c2.metric("📚 Enrollments", f"{int(kpi['Enrollments']):,}")
+c3.metric("📝 Graded results", f"{int(kpi['Results']):,}")
 c4.metric("📊 Avg weighted mark", f"{float(kpi['avg_mark']):.2f}")
-c5.metric("💰 Outstanding (GHS)", f"{float(kpi['outstanding']):,.0f}")
+c5.metric("💰 Outstanding (GHS)", f"{float(kpi['Outstanding']):,.0f}")
 c6.metric("💻 LMS events", f"{int(kpi['lms_events']):,}")
 
 st.divider()

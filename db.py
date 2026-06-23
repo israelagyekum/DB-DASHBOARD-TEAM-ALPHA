@@ -1,6 +1,7 @@
 """
 db.py  —  Shared database utilities for GADMS Dashboard
-Persistent DuckDB — no external database required.
+Persistent DuckDB file — no external database required.
+Uses hardcoded DuckDB-compatible DDL + INSERT-only loading from TEAM_ALPHA.sql.
 """
 import re
 from pathlib import Path
@@ -8,14 +9,108 @@ import pandas as pd
 import streamlit as st
 
 SQL_FILE = Path(__file__).parent / "TEAM_ALPHA.sql"
-DB_FILE  = Path(__file__).parent / "gadms_v2.duckdb"   # new name forces fresh build
+DB_FILE  = Path(__file__).parent / "gadms_v3.duckdb"
+
+# DuckDB-compatible schema (no FK constraints, no CHECK constraints)
+_DDL = """
+CREATE TABLE IF NOT EXISTS Department (
+    DepartmentID   INTEGER PRIMARY KEY,
+    DepartmentName VARCHAR(100),
+    Faculty        VARCHAR(100),
+    OfficeLocation VARCHAR(100)
+);
+CREATE TABLE IF NOT EXISTS Programme (
+    ProgrammeID   INTEGER PRIMARY KEY,
+    DepartmentID  INTEGER,
+    ProgrammeCode VARCHAR(10),
+    ProgrammeName VARCHAR(100),
+    DegreeType    VARCHAR(50),
+    DurationYears INTEGER
+);
+CREATE TABLE IF NOT EXISTS Course (
+    CourseID     INTEGER PRIMARY KEY,
+    DepartmentID INTEGER,
+    CourseCode   VARCHAR(10),
+    CourseTitle  VARCHAR(150),
+    CreditHours  INTEGER
+);
+CREATE TABLE IF NOT EXISTS Lecturer (
+    LecturerID   VARCHAR(15) PRIMARY KEY,
+    DepartmentID INTEGER,
+    LecturerName VARCHAR(100),
+    Rank         VARCHAR(50),
+    Email        VARCHAR(100)
+);
+CREATE TABLE IF NOT EXISTS Semester (
+    SemesterID   INTEGER PRIMARY KEY,
+    SemesterName VARCHAR(40),
+    StartDate    DATE,
+    EndDate      DATE
+);
+CREATE TABLE IF NOT EXISTS Student (
+    StudentID     VARCHAR(15) PRIMARY KEY,
+    ProgrammeID   INTEGER,
+    FirstName     VARCHAR(50),
+    LastName      VARCHAR(50),
+    Gender        VARCHAR(10),
+    DateOfBirth   DATE,
+    Email         VARCHAR(100),
+    PhoneNumber   VARCHAR(20),
+    AdmissionYear INTEGER,
+    Status        VARCHAR(20) DEFAULT 'Active'
+);
+CREATE TABLE IF NOT EXISTS Admission (
+    AdmissionID     INTEGER PRIMARY KEY,
+    ProgrammeID     INTEGER,
+    ApplicantName   VARCHAR(100),
+    AdmissionDate   DATE,
+    AdmissionStatus VARCHAR(30)
+);
+CREATE TABLE IF NOT EXISTS CourseOffering (
+    CourseOfferingID INTEGER PRIMARY KEY,
+    CourseID         INTEGER,
+    LecturerID       VARCHAR(15),
+    SemesterID       INTEGER,
+    AcademicYear     VARCHAR(9)
+);
+CREATE TABLE IF NOT EXISTS Enrollment (
+    EnrollmentID     INTEGER PRIMARY KEY,
+    StudentID        VARCHAR(15),
+    CourseOfferingID INTEGER,
+    EnrollmentDate   DATE,
+    EnrollmentStatus VARCHAR(20) DEFAULT 'Active'
+);
+CREATE TABLE IF NOT EXISTS AssessmentResult (
+    ResultID        INTEGER PRIMARY KEY,
+    EnrollmentID    INTEGER,
+    CourseworkScore DECIMAL(5,2),
+    ExamScore       DECIMAL(5,2),
+    FinalGrade      VARCHAR(3)
+);
+CREATE TABLE IF NOT EXISTS FeePayment (
+    PaymentID     INTEGER PRIMARY KEY,
+    StudentID     VARCHAR(15),
+    AmountPaid    DECIMAL(10,2),
+    PaymentDate   DATE,
+    PaymentMethod VARCHAR(30),
+    Balance       DECIMAL(10,2)
+);
+CREATE TABLE IF NOT EXISTS LMSActivity (
+    ActivityID       INTEGER PRIMARY KEY,
+    StudentID        VARCHAR(15),
+    CourseOfferingID INTEGER,
+    LoginTimestamp   TIMESTAMP,
+    ActivityType     VARCHAR(50),
+    DurationMinutes  INTEGER
+);
+"""
 
 
 @st.cache_resource(show_spinner="Loading GADMS database...")
 def get_connection():
     import duckdb
 
-    # Delete any old/corrupt DB files from previous attempts
+    # Remove any old/corrupt DB files from previous attempts
     for old in Path(__file__).parent.glob("gadms*.duckdb"):
         if old.name != DB_FILE.name:
             try:
@@ -25,19 +120,18 @@ def get_connection():
 
     first_run = not DB_FILE.exists()
     con = duckdb.connect(str(DB_FILE))
-
     try:
         con.execute("SET preserve_identifier_case = false")
     except Exception:
         pass
 
     if first_run:
-        _load_sql(con, SQL_FILE)
+        _bootstrap(con)
     else:
-        # Health check — rebuild if tables are missing
+        # Health check — rebuild if data is missing
         try:
-            count = con.execute("SELECT COUNT(*) FROM Programme").fetchone()[0]
-            if count == 0:
+            n = con.execute("SELECT COUNT(*) FROM Programme").fetchone()[0]
+            if n == 0:
                 raise Exception("empty")
         except Exception:
             con.close()
@@ -50,41 +144,48 @@ def get_connection():
                 con.execute("SET preserve_identifier_case = false")
             except Exception:
                 pass
-            _load_sql(con, SQL_FILE)
+            _bootstrap(con)
 
     return con
 
 
-def _load_sql(con, sql_path: Path):
-    if not sql_path.exists():
-        st.error(f"SQL file not found: {sql_path}")
+def _bootstrap(con):
+    """Create schema and load data from TEAM_ALPHA.sql."""
+    # 1. Create tables using clean DuckDB DDL
+    for stmt in _DDL.strip().split(";"):
+        stmt = stmt.strip()
+        if stmt:
+            try:
+                con.execute(stmt)
+            except Exception:
+                pass
+
+    # 2. Load only INSERT statements from the SQL file
+    if not SQL_FILE.exists():
+        st.error(f"SQL file not found: {SQL_FILE}")
         st.stop()
 
-    raw = sql_path.read_text()
-    t = raw.replace("SET client_min_messages = WARNING;", "")
-    t = re.sub(r"SELECT setval\([^;]*\);", "", t)
-    t = re.sub(r'\bBIGSERIAL\s+PRIMARY\s+KEY\b',
-               'BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY', t)
-    t = re.sub(r'\bSERIAL\s+PRIMARY\s+KEY\b',
-               'INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY', t)
+    raw = SQL_FILE.read_text()
+    raw = re.sub(r"SELECT setval\([^;]*\);", "", raw)
 
     buff, stmts = [], []
-    for line in t.split("\n"):
+    for line in raw.split("\n"):
         buff.append(line)
         if line.strip().endswith(";"):
             stmts.append("\n".join(buff))
             buff = []
 
     c = {"e": 0, "a": 0, "f": 0, "l": 0}
-    ok_count = 0
     for st_ in stmts:
-        s = st_
-        lines = s.split("\n")
-        while lines and (lines[0].strip().startswith("--") or not lines[0].strip()):
-            lines.pop(0)
-        s = "\n".join(lines).strip()
-        if not s:
+        # Strip comment lines
+        s = "\n".join(
+            ln for ln in st_.split("\n")
+            if not ln.strip().startswith("--")
+        ).strip()
+        # Only process INSERT statements
+        if not s or not s.upper().startswith("INSERT"):
             continue
+        # Inject serial IDs for tables without explicit PKs
         if s.startswith("INSERT INTO Enrollment "):
             c["e"] += 1
             s = s.replace("(StudentID,", "(EnrollmentID, StudentID,")
@@ -103,26 +204,6 @@ def _load_sql(con, sql_path: Path):
             s = s.replace(") VALUES (", f") VALUES ({c['l']}, ", 1)
         try:
             con.execute(s)
-            ok_count += 1
-        except Exception:
-            pass
-
-    _reset_sequences(con)
-    return ok_count
-
-
-def _reset_sequences(con):
-    tables = {
-        "Department": "DepartmentID",       "Programme": "ProgrammeID",
-        "Course": "CourseID",               "Semester": "SemesterID",
-        "Admission": "AdmissionID",         "CourseOffering": "CourseOfferingID",
-        "Enrollment": "EnrollmentID",       "AssessmentResult": "ResultID",
-        "FeePayment": "PaymentID",          "LMSActivity": "ActivityID",
-    }
-    for tbl, col in tables.items():
-        try:
-            row = con.execute(f"SELECT COALESCE(MAX({col}),0)+1 FROM {tbl}").fetchone()
-            con.execute(f"ALTER TABLE {tbl} ALTER COLUMN {col} RESTART WITH {int(row[0])}")
         except Exception:
             pass
 
@@ -176,12 +257,14 @@ def _fix_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=5, show_spinner=False)
 def q(sql: str) -> pd.DataFrame:
+    """Execute a read SQL query. Cached for 5 seconds."""
     con = get_connection()
     df = con.execute(sql).fetchdf()
     return _fix_columns(df)
 
 
 def run_write(sql: str) -> None:
+    """Execute a write (INSERT/UPDATE/DELETE). Clears cache immediately."""
     con = get_connection()
     con.execute(sql)
     q.clear()

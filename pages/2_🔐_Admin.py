@@ -1,16 +1,6 @@
 """
 Admin Backend  —  GADMS Student Management
 ==========================================
-Tabs:
-  1. ➕ Add Student
-  2. 📋 Manage Students
-  3. 📚 Enrol in Course
-  4. 💰 Fee Management
-  5. 👨‍🏫 Lecturers & Courses
-  6. 🎓 Programmes
-
-Password: set ADMIN_PASSWORD in Streamlit secrets (default: "gadms2026").
-
 DSCD 606 Data Management Techniques  |  University of Ghana
 """
 
@@ -91,8 +81,9 @@ def _next_student_id() -> str:
 
 
 def _next_serial_id(table: str, id_col: str) -> int:
-    _, conn = get_connection()
-    row = conn.execute(
+    """Get next available ID for a table — works with persistent DuckDB."""
+    con = get_connection()
+    row = con.execute(
         f"SELECT COALESCE(MAX({id_col}), 0) + 1 AS nid FROM {table}"
     ).fetchone()
     return int(row[0])
@@ -109,10 +100,11 @@ def _ok(msg: str):
 st.title("🔐 GADMS Admin Backend")
 st.caption("DSCD 606 Data Management Techniques  •  University of Ghana")
 
-if is_postgres():
-    st.success("🟢 **PostgreSQL (live)** — every change is permanently saved and immediately visible on the dashboard.")
-else:
-    st.warning("⚠️ **DuckDB (embedded)** — changes last for this session only. Add DATABASE_URL to Streamlit secrets for permanent storage.")
+# Correct status message — DuckDB file IS persistent
+st.success(
+    "🟢 **DuckDB (persistent file)** — every change is permanently saved "
+    "to `gadms_v3.duckdb` and immediately visible on the dashboard."
+)
 
 if st.sidebar.button("🚪 Logout"):
     st.session_state["admin_auth"] = False
@@ -244,7 +236,7 @@ with tab_manage:
                     upd = f"UPDATE Student SET ProgrammeID = {pm2[new_val]} WHERE StudentID = '{_esc(sid_upd.strip())}'"
                 try:
                     run_write(upd)
-                    st.success(f"✅ **{field_upd}** → **{new_val}** for `{sid_upd.strip()}`")
+                    st.success(f"✅ **{field_upd}** updated to **{new_val}** for `{sid_upd.strip()}`")
                 except Exception as ex:
                     st.error(f"Update failed: {ex}")
 
@@ -256,20 +248,20 @@ with tab_enroll:
     st.subheader("Enrol a Student in a Course Offering")
 
     off_df = q("""SELECT co.CourseOfferingID,
-                         c.CourseCode || ' — ' || c.CourseTitle AS CourseName,
+                         c.CourseCode || ' - ' || c.CourseTitle AS CourseName,
                          co.AcademicYear, l.LecturerName
                   FROM CourseOffering co
                   JOIN Course c ON c.CourseID = co.CourseID
                   JOIN Lecturer l ON l.LecturerID = co.LecturerID
                   ORDER BY co.CourseOfferingID""")
     off_map = {
-        f"[{r['CourseOfferingID']}] {r['CourseName']} ({r['AcademicYear']}) — {r['LecturerName']}":
+        f"[{r['CourseOfferingID']}] {r['CourseName']} ({r['AcademicYear']}) - {r['LecturerName']}":
             int(r["CourseOfferingID"])
         for _, r in off_df.iterrows()
     }
 
     with st.form("enroll_form"):
-        e1, e2    = st.columns(2)
+        e1, e2        = st.columns(2)
         enroll_sid    = e1.text_input("Student ID *", placeholder="e.g. UG2026101")
         off_label     = e2.selectbox("Course Offering *", list(off_map.keys()))
         enroll_date   = st.date_input("Enrollment Date", value=date.today())
@@ -281,15 +273,11 @@ with tab_enroll:
             st.error("Student ID required.")
         else:
             oid = off_map[off_label]
-            if is_postgres():
-                sql = f"""INSERT INTO Enrollment (StudentID, CourseOfferingID, EnrollmentDate, EnrollmentStatus)
-                          VALUES ('{_esc(enroll_sid.strip())}', {oid},
-                                  '{enroll_date.strftime('%Y-%m-%d')}', '{enroll_status}')"""
-            else:
-                nid = _next_serial_id("Enrollment", "EnrollmentID")
-                sql = f"""INSERT INTO Enrollment (EnrollmentID, StudentID, CourseOfferingID, EnrollmentDate, EnrollmentStatus)
-                          VALUES ({nid}, '{_esc(enroll_sid.strip())}', {oid},
-                                  '{enroll_date.strftime('%Y-%m-%d')}', '{enroll_status}')"""
+            nid = _next_serial_id("Enrollment", "EnrollmentID")
+            sql = f"""INSERT INTO Enrollment
+                      (EnrollmentID, StudentID, CourseOfferingID, EnrollmentDate, EnrollmentStatus)
+                      VALUES ({nid}, '{_esc(enroll_sid.strip())}', {oid},
+                              '{enroll_date.strftime('%Y-%m-%d')}', '{enroll_status}')"""
             try:
                 run_write(sql)
                 _ok(f"✅ Enrolled `{enroll_sid.strip()}` successfully!")
@@ -297,8 +285,6 @@ with tab_enroll:
                 err = str(ex)
                 if "UNIQUE" in err.upper():
                     st.error("Already enrolled in that offering.")
-                elif "FOREIGN KEY" in err.upper() or "violates foreign key" in err.lower():
-                    st.error("Student ID not found — add the student first.")
                 else:
                     st.error(f"Failed: {ex}")
 
@@ -327,24 +313,16 @@ with tab_fee:
             elif fee_amount <= 0:
                 st.error("Amount must be greater than 0.")
             else:
-                if is_postgres():
-                    sql = f"""INSERT INTO FeePayment (StudentID, AmountPaid, PaymentDate, PaymentMethod, Balance)
-                              VALUES ('{_esc(fee_sid.strip())}', {fee_amount},
-                                      '{fee_date.strftime('%Y-%m-%d')}', '{fee_method}', {fee_bal})"""
-                else:
-                    nid = _next_serial_id("FeePayment", "PaymentID")
-                    sql = f"""INSERT INTO FeePayment (PaymentID, StudentID, AmountPaid, PaymentDate, PaymentMethod, Balance)
-                              VALUES ({nid}, '{_esc(fee_sid.strip())}', {fee_amount},
-                                      '{fee_date.strftime('%Y-%m-%d')}', '{fee_method}', {fee_bal})"""
+                nid = _next_serial_id("FeePayment", "PaymentID")
+                sql = f"""INSERT INTO FeePayment
+                          (PaymentID, StudentID, AmountPaid, PaymentDate, PaymentMethod, Balance)
+                          VALUES ({nid}, '{_esc(fee_sid.strip())}', {fee_amount},
+                                  '{fee_date.strftime('%Y-%m-%d')}', '{fee_method}', {fee_bal})"""
                 try:
                     run_write(sql)
                     _ok(f"✅ Payment of **GHS {fee_amount:,.2f}** recorded for `{fee_sid.strip()}`.")
                 except Exception as ex:
-                    err = str(ex)
-                    if "FOREIGN KEY" in err.upper() or "violates foreign key" in err.lower():
-                        st.error("Student ID not found.")
-                    else:
-                        st.error(f"Failed: {ex}")
+                    st.error(f"Failed: {ex}")
 
     with fee_sub2:
         st.markdown("Summary of all fee payments per student.")
@@ -361,7 +339,7 @@ with tab_fee:
             JOIN Programme p ON p.ProgrammeID = s.ProgrammeID
             LEFT JOIN FeePayment f ON f.StudentID = s.StudentID
             GROUP BY s.StudentID, s.FirstName, s.LastName, p.ProgrammeName
-            ORDER BY TotalBalance DESC NULLS LAST
+            ORDER BY TotalBalance DESC
         """)
         if fee_search.strip():
             mask = (fee_sum["StudentID"].str.contains(fee_search, case=False, na=False)
@@ -441,7 +419,7 @@ with tab_lec:
         st.markdown("Create a new **Course Offering** — links a course, lecturer, and semester.")
 
         courses_df   = q("SELECT CourseID, CourseCode, CourseTitle FROM Course ORDER BY CourseCode")
-        course_map   = {f"{r['CourseCode']} — {r['CourseTitle']}": int(r["CourseID"])
+        course_map   = {f"{r['CourseCode']} - {r['CourseTitle']}": int(r["CourseID"])
                         for _, r in courses_df.iterrows()}
 
         lec_list_df  = q("SELECT LecturerID, LecturerName FROM Lecturer ORDER BY LecturerName")
@@ -452,7 +430,7 @@ with tab_lec:
         sem_map  = {r["SemesterName"]: int(r["SemesterID"]) for _, r in sems_df.iterrows()}
 
         with st.form("offering_form", clear_on_submit=True):
-            o1, o2    = st.columns(2)
+            o1, o2     = st.columns(2)
             off_course = o1.selectbox("Course *", list(course_map.keys()))
             off_lec    = o2.selectbox("Lecturer *", list(lec_list_map.keys()))
             off_sem    = o1.selectbox("Semester *", list(sem_map.keys()))
@@ -464,21 +442,18 @@ with tab_lec:
             if not off_year.strip():
                 st.error("Academic Year is required.")
             else:
-                cid = course_map[off_course]
-                lid = lec_list_map[off_lec]
+                cid     = course_map[off_course]
+                lid     = lec_list_map[off_lec]
                 sid_val = sem_map[off_sem]
-                if is_postgres():
-                    sql = f"""INSERT INTO CourseOffering (CourseID, LecturerID, SemesterID, AcademicYear)
-                              VALUES ({cid}, '{_esc(lid)}', {sid_val}, '{_esc(off_year.strip())}')"""
-                else:
-                    nid = _next_serial_id("CourseOffering", "CourseOfferingID")
-                    sql = f"""INSERT INTO CourseOffering (CourseOfferingID, CourseID, LecturerID, SemesterID, AcademicYear)
-                              VALUES ({nid}, {cid}, '{_esc(lid)}', {sid_val}, '{_esc(off_year.strip())}')"""
+                nid     = _next_serial_id("CourseOffering", "CourseOfferingID")
+                sql = f"""INSERT INTO CourseOffering
+                          (CourseOfferingID, CourseID, LecturerID, SemesterID, AcademicYear)
+                          VALUES ({nid}, {cid}, '{_esc(lid)}', {sid_val}, '{_esc(off_year.strip())}')"""
                 try:
                     run_write(sql)
-                    _ok(f"✅ Course offering created for **{off_course.split('—')[0].strip()}**.")
+                    _ok(f"✅ Course offering created for **{off_course.split('-')[0].strip()}**.")
                 except Exception as ex:
-                    st.error("Duplicate offering for that course/semester/year." if "UNIQUE" in str(ex).upper() else f"Error: {ex}")
+                    st.error(f"Error: {ex}")
 
         st.divider()
         st.markdown("**Existing course offerings:**")
@@ -505,7 +480,7 @@ with tab_prog:
         dept_map2 = {r["DepartmentName"]: int(r["DepartmentID"]) for _, r in depts_df2.iterrows()}
 
         with st.form("add_prog_form", clear_on_submit=True):
-            p1, p2    = st.columns(2)
+            p1, p2        = st.columns(2)
             prog_dept     = p1.selectbox("Department *", list(dept_map2.keys()))
             prog_code     = p2.text_input("Programme Code *", placeholder="e.g. AI-MS")
             prog_name     = p1.text_input("Programme Name *", placeholder="e.g. MSc Artificial Intelligence")
@@ -517,18 +492,14 @@ with tab_prog:
             if not prog_code.strip() or not prog_name.strip():
                 st.error("Programme Code and Name are required.")
             else:
-                if is_postgres():
-                    sql = f"""INSERT INTO Programme (DepartmentID, ProgrammeCode, ProgrammeName, DegreeType, DurationYears)
-                              VALUES ({dept_map2[prog_dept]}, '{_esc(prog_code.strip())}',
-                                      '{_esc(prog_name.strip())}', '{prog_degree}', {int(prog_duration)})"""
-                else:
-                    nid = _next_serial_id("Programme", "ProgrammeID")
-                    sql = f"""INSERT INTO Programme (ProgrammeID, DepartmentID, ProgrammeCode, ProgrammeName, DegreeType, DurationYears)
-                              VALUES ({nid}, {dept_map2[prog_dept]}, '{_esc(prog_code.strip())}',
-                                      '{_esc(prog_name.strip())}', '{prog_degree}', {int(prog_duration)})"""
+                nid = _next_serial_id("Programme", "ProgrammeID")
+                sql = f"""INSERT INTO Programme
+                          (ProgrammeID, DepartmentID, ProgrammeCode, ProgrammeName, DegreeType, DurationYears)
+                          VALUES ({nid}, {dept_map2[prog_dept]}, '{_esc(prog_code.strip())}',
+                                  '{_esc(prog_name.strip())}', '{prog_degree}', {int(prog_duration)})"""
                 try:
                     run_write(sql)
-                    _ok(f"✅ Programme **{prog_name.strip()}** ({prog_code.strip()}) added successfully!")
+                    _ok(f"✅ Programme **{prog_name.strip()}** ({prog_code.strip()}) added!")
                 except Exception as ex:
                     st.error("Duplicate programme code." if "UNIQUE" in str(ex).upper() else f"Error: {ex}")
 

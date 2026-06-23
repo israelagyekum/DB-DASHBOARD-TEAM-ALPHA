@@ -1,8 +1,6 @@
 """
 db.py  —  Shared database utilities for GADMS Dashboard
-=========================================================
-Persistent DuckDB file — no external database required.
-All writes persist immediately and are visible across all pages.
+Persistent DuckDB — no external database required.
 """
 import re
 from pathlib import Path
@@ -10,37 +8,48 @@ import pandas as pd
 import streamlit as st
 
 SQL_FILE = Path(__file__).parent / "TEAM_ALPHA.sql"
-DB_FILE  = Path(__file__).parent / "gadms.duckdb"
+DB_FILE  = Path(__file__).parent / "gadms_v2.duckdb"   # new name forces fresh build
 
 
 @st.cache_resource(show_spinner="Loading GADMS database...")
 def get_connection():
     import duckdb
 
-    def _open_and_configure(path):
-        con = duckdb.connect(str(path))
-        try:
-            con.execute("SET preserve_identifier_case = false")
-        except Exception:
-            pass
-        return con
+    # Delete any old/corrupt DB files from previous attempts
+    for old in Path(__file__).parent.glob("gadms*.duckdb"):
+        if old.name != DB_FILE.name:
+            try:
+                old.unlink()
+            except Exception:
+                pass
 
     first_run = not DB_FILE.exists()
-    con = _open_and_configure(DB_FILE)
+    con = duckdb.connect(str(DB_FILE))
+
+    try:
+        con.execute("SET preserve_identifier_case = false")
+    except Exception:
+        pass
 
     if first_run:
         _load_sql(con, SQL_FILE)
     else:
-        # Health-check — if DB is corrupted or empty, rebuild it
+        # Health check — rebuild if tables are missing
         try:
-            con.execute("SELECT COUNT(*) FROM Student").fetchone()
+            count = con.execute("SELECT COUNT(*) FROM Programme").fetchone()[0]
+            if count == 0:
+                raise Exception("empty")
         except Exception:
             con.close()
             try:
                 DB_FILE.unlink()
             except Exception:
                 pass
-            con = _open_and_configure(DB_FILE)
+            con = duckdb.connect(str(DB_FILE))
+            try:
+                con.execute("SET preserve_identifier_case = false")
+            except Exception:
+                pass
             _load_sql(con, SQL_FILE)
 
     return con
@@ -67,6 +76,7 @@ def _load_sql(con, sql_path: Path):
             buff = []
 
     c = {"e": 0, "a": 0, "f": 0, "l": 0}
+    ok_count = 0
     for st_ in stmts:
         s = st_
         lines = s.split("\n")
@@ -93,10 +103,12 @@ def _load_sql(con, sql_path: Path):
             s = s.replace(") VALUES (", f") VALUES ({c['l']}, ", 1)
         try:
             con.execute(s)
+            ok_count += 1
         except Exception:
             pass
 
     _reset_sequences(con)
+    return ok_count
 
 
 def _reset_sequences(con):
@@ -164,14 +176,12 @@ def _fix_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(ttl=5, show_spinner=False)
 def q(sql: str) -> pd.DataFrame:
-    """Execute a read SQL query. Results cached for 5 seconds."""
     con = get_connection()
     df = con.execute(sql).fetchdf()
     return _fix_columns(df)
 
 
 def run_write(sql: str) -> None:
-    """Execute a write (INSERT/UPDATE/DELETE). Clears cache immediately."""
     con = get_connection()
     con.execute(sql)
     q.clear()

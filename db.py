@@ -1,58 +1,39 @@
 """
 db.py  —  Shared database utilities for GADMS Dashboard
 =========================================================
-Imported by both app.py (dashboard) and pages/2_Admin.py (admin backend).
-Using a single module ensures both pages share the SAME @st.cache_resource
-connection, so admin writes are instantly visible on the dashboard.
+Uses a PERSISTENT DuckDB file stored on Streamlit Cloud's filesystem.
+No external database needed — completely free, no accounts required.
+
+Write operations persist to the DuckDB file immediately and are visible
+across all pages of the app.
 """
-import os
 import re
 from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-SQL_FILE = Path(__file__).parent / "TEAM_ALPHA.sql"
+SQL_FILE  = Path(__file__).parent / "TEAM_ALPHA.sql"
+# DuckDB file stored next to the app — persists across Streamlit reruns
+DB_FILE   = Path(__file__).parent / "gadms.duckdb"
 
 
-def _get_pg_url():
-    """Look for a Postgres URL in Streamlit secrets or environment."""
-    try:
-        url = st.secrets.get("DATABASE_URL")
-        if url:
-            return str(url).strip()
-    except Exception:
-        pass
-    return os.environ.get("DATABASE_URL", "").strip() or None
-
-
-@st.cache_resource(show_spinner="Connecting to database...")
+@st.cache_resource(show_spinner="Loading GADMS database...")
 def get_connection():
-    """Return (kind, connection). Postgres if DATABASE_URL is set, else DuckDB."""
-    pg_url = _get_pg_url()
-    if pg_url:
-        from sqlalchemy import create_engine
-        # Always normalise to postgresql:// — psycopg2 requires this
-        url = pg_url.replace("postgres://", "postgresql://", 1)
-        engine = create_engine(
-            url,
-            pool_pre_ping=True,
-            pool_size=2,
-            max_overflow=3,
-            pool_timeout=30,
-            pool_recycle=300,
-            connect_args={"sslmode": "require", "connect_timeout": 15},
-        )
-        return "postgres", engine
-
-    # Fallback: in-memory DuckDB loaded from TEAM_ALPHA.sql
+    """
+    Return a persistent DuckDB connection backed by gadms.duckdb.
+    On first run the file doesn't exist, so we create it and load the SQL.
+    On subsequent runs we just open the existing file.
+    """
     import duckdb
-    con = duckdb.connect(":memory:")
-    _load_sql_into_duckdb(con, SQL_FILE)
+    first_run = not DB_FILE.exists()
+    con = duckdb.connect(str(DB_FILE))          # persistent file, not :memory:
+    if first_run:
+        _load_sql_into_duckdb(con, SQL_FILE)
     return "duckdb", con
 
 
 def _load_sql_into_duckdb(con, sql_path: Path):
-    """Translate Postgres-specific syntax and execute the GADMS script in DuckDB."""
+    """Load TEAM_ALPHA.sql into a fresh DuckDB database."""
     if not sql_path.exists():
         st.error(f"SQL file not found: {sql_path}")
         st.stop()
@@ -107,10 +88,10 @@ def _load_sql_into_duckdb(con, sql_path: Path):
         except Exception:
             pass
 
-    _reset_identity_sequences(con)
+    _reset_sequences(con)
 
 
-def _reset_identity_sequences(con) -> None:
+def _reset_sequences(con) -> None:
     tables = {
         "Department":       "DepartmentID",
         "Programme":        "ProgrammeID",
@@ -128,93 +109,77 @@ def _reset_identity_sequences(con) -> None:
             row = con.execute(
                 f"SELECT COALESCE(MAX({col}), 0) + 1 FROM {tbl}"
             ).fetchone()
-            next_val = int(row[0])
             con.execute(
-                f"ALTER TABLE {tbl} ALTER COLUMN {col} RESTART WITH {next_val}"
+                f"ALTER TABLE {tbl} ALTER COLUMN {col} RESTART WITH {int(row[0])}"
             )
         except Exception:
             pass
 
 
 _COL_MAP: dict[str, str] = {
-    'departmentid': 'DepartmentID',       'departmentname': 'DepartmentName',
-    'faculty': 'Faculty',                  'officelocation': 'OfficeLocation',
-    'programmeid': 'ProgrammeID',          'programmecode': 'ProgrammeCode',
-    'programmename': 'ProgrammeName',      'degreetype': 'DegreeType',
+    'departmentid': 'DepartmentID',        'departmentname': 'DepartmentName',
+    'faculty': 'Faculty',                   'officelocation': 'OfficeLocation',
+    'programmeid': 'ProgrammeID',           'programmecode': 'ProgrammeCode',
+    'programmename': 'ProgrammeName',       'degreetype': 'DegreeType',
     'durationyears': 'DurationYears',
-    'courseid': 'CourseID',                'coursecode': 'CourseCode',
-    'coursetitle': 'CourseTitle',          'credithours': 'CreditHours',
-    'lecturerid': 'LecturerID',            'lecturername': 'LecturerName',
-    'rank': 'Rank',                        'email': 'Email',
-    'semesterid': 'SemesterID',            'semestername': 'SemesterName',
-    'startdate': 'StartDate',              'enddate': 'EndDate',
-    'studentid': 'StudentID',              'firstname': 'FirstName',
-    'lastname': 'LastName',                'gender': 'Gender',
-    'dateofbirth': 'DateOfBirth',          'phonenumber': 'PhoneNumber',
-    'admissionyear': 'AdmissionYear',      'status': 'Status',
-    'admissionid': 'AdmissionID',          'applicantname': 'ApplicantName',
-    'admissiondate': 'AdmissionDate',      'admissionstatus': 'AdmissionStatus',
-    'courseofferingid': 'CourseOfferingID','academicyear': 'AcademicYear',
-    'enrollmentid': 'EnrollmentID',        'enrollmentdate': 'EnrollmentDate',
+    'courseid': 'CourseID',                 'coursecode': 'CourseCode',
+    'coursetitle': 'CourseTitle',           'credithours': 'CreditHours',
+    'lecturerid': 'LecturerID',             'lecturername': 'LecturerName',
+    'rank': 'Rank',                         'email': 'Email',
+    'semesterid': 'SemesterID',             'semestername': 'SemesterName',
+    'startdate': 'StartDate',               'enddate': 'EndDate',
+    'studentid': 'StudentID',               'firstname': 'FirstName',
+    'lastname': 'LastName',                 'gender': 'Gender',
+    'dateofbirth': 'DateOfBirth',           'phonenumber': 'PhoneNumber',
+    'admissionyear': 'AdmissionYear',       'status': 'Status',
+    'admissionid': 'AdmissionID',           'applicantname': 'ApplicantName',
+    'admissiondate': 'AdmissionDate',       'admissionstatus': 'AdmissionStatus',
+    'courseofferingid': 'CourseOfferingID', 'academicyear': 'AcademicYear',
+    'enrollmentid': 'EnrollmentID',         'enrollmentdate': 'EnrollmentDate',
     'enrollmentstatus': 'EnrollmentStatus',
-    'resultid': 'ResultID',                'courseworkscore': 'CourseworkScore',
-    'examscore': 'ExamScore',              'finalgrade': 'FinalGrade',
-    'paymentid': 'PaymentID',              'amountpaid': 'AmountPaid',
-    'paymentdate': 'PaymentDate',          'paymentmethod': 'PaymentMethod',
+    'resultid': 'ResultID',                 'courseworkscore': 'CourseworkScore',
+    'examscore': 'ExamScore',               'finalgrade': 'FinalGrade',
+    'paymentid': 'PaymentID',               'amountpaid': 'AmountPaid',
+    'paymentdate': 'PaymentDate',           'paymentmethod': 'PaymentMethod',
     'balance': 'Balance',
-    'activityid': 'ActivityID',            'logintimestamp': 'LoginTimestamp',
-    'activitytype': 'ActivityType',        'durationminutes': 'DurationMinutes',
-    'students': 'Students',                'enrollments': 'Enrollments',
-    'results': 'Results',                  'events': 'Events',
-    'minutes': 'Minutes',                  'total': 'Total',
-    'payments': 'Payments',                'paid': 'Paid',
-    'outstanding': 'Outstanding',          'count': 'Count',
-    'fullname': 'FullName',                'coursename': 'CourseName',
-    'grade': 'Grade',                      'avgmark': 'AvgMark',
-    'totalpaid': 'TotalPaid',              'totalbalance': 'TotalBalance',
-    'numpayments': 'NumPayments',          'numsections': 'NumSections',
-    'n': 'n',                              'label': 'label',
+    'activityid': 'ActivityID',             'logintimestamp': 'LoginTimestamp',
+    'activitytype': 'ActivityType',         'durationminutes': 'DurationMinutes',
+    'students': 'Students',                 'enrollments': 'Enrollments',
+    'results': 'Results',                   'events': 'Events',
+    'minutes': 'Minutes',                   'total': 'Total',
+    'payments': 'Payments',                 'paid': 'Paid',
+    'outstanding': 'Outstanding',           'count': 'Count',
+    'fullname': 'FullName',                 'coursename': 'CourseName',
+    'grade': 'Grade',                       'avgmark': 'AvgMark',
+    'totalpaid': 'TotalPaid',               'totalbalance': 'TotalBalance',
+    'numpayments': 'NumPayments',           'numsections': 'NumSections',
+    'n': 'n',                               'label': 'label',
     'studentname': 'StudentName',
 }
 
 
 def _fix_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename DataFrame columns to their expected CamelCase form."""
     df.columns = [_COL_MAP.get(c.lower(), c) for c in df.columns]
     return df
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=5, show_spinner=False)
 def q(sql: str) -> pd.DataFrame:
-    """
-    Execute a read-only SQL query and return a DataFrame with normalised column names.
-    Cached for 30 seconds; cleared immediately after any admin write.
-    """
-    kind, conn = get_connection()
-    if kind == "postgres":
-        # Must pass a Connection object, NOT the Engine, to pd.read_sql_query
-        with conn.connect() as cx:
-            df = pd.read_sql_query(sql, cx)
-    else:
-        df = conn.execute(sql).fetchdf()
+    """Execute a read-only SQL query. Cached for 5 seconds."""
+    _, con = get_connection()
+    df = con.execute(sql).fetchdf()
     return _fix_columns(df)
 
 
 def run_write(sql: str) -> None:
     """
-    Execute a write operation (INSERT / UPDATE / DELETE).
-    Clears the query cache so the dashboard reflects the change immediately.
+    Execute a write (INSERT / UPDATE / DELETE) directly on the DuckDB file.
+    Cache is cleared so the dashboard reflects the change immediately.
     """
-    kind, conn = get_connection()
-    if kind == "postgres":
-        from sqlalchemy import text
-        with conn.connect() as cx:
-            cx.execute(text(sql))
-            cx.commit()
-    else:
-        conn.execute(sql)
+    _, con = get_connection()
+    con.execute(sql)
     q.clear()
 
 
 def is_postgres() -> bool:
-    return get_connection()[0] == "postgres"
+    return False

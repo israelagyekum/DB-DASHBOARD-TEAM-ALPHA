@@ -1,24 +1,15 @@
 """
 GADMS Analytics Dashboard
 =========================
-Portfolio dashboard for the Governed Academic Data Management System.
-
-Two connection modes (auto-detected):
-  1. Cloud Postgres  -- if a DATABASE_URL is in st.secrets or env vars
-  2. Local DuckDB    -- loads ./TEAM_ALPHA.sql into an in-memory database
-                        so the app runs anywhere with zero setup.
-
+Governed Academic Data Management System
 DSCD 606 Data Management Techniques  |  University of Ghana
 """
 
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
 
-# Shared DB utilities — connection is cached at process level so the
-# Admin page (pages/2_🔐_Admin.py) writes to the same DuckDB instance.
-from db import get_connection, q
+from db import q, run_write, is_postgres
 
 # =====================================================================
 # PAGE CONFIG
@@ -30,7 +21,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Light custom styling
 st.markdown("""
 <style>
   .block-container { padding-top: 2rem; padding-bottom: 2rem; }
@@ -42,10 +32,11 @@ st.markdown("""
   .stTabs [data-baseweb="tab"] {
       background-color: #F2F6FB; border-radius: 6px 6px 0 0; padding: 8px 16px;
   }
-  .stTabs [aria-selected="true"] { background-color: #1F3864 !important; color: white !important; }
+  .stTabs [aria-selected="true"] {
+      background-color: #1F3864 !important; color: white !important;
+  }
 </style>
 """, unsafe_allow_html=True)
-
 
 # =====================================================================
 # HEADER
@@ -58,11 +49,11 @@ with col_l:
         "DSCD 606 Data Management Techniques  •  University of Ghana"
     )
 with col_r:
-    kind, _ = get_connection()
-    badge = "🟢 Postgres (live)" if kind == "postgres" else "🦆 DuckDB (embedded)"
+    badge = "🟢 Postgres (live)" if is_postgres() else "🦆 DuckDB (embedded)"
+    color = "#1F7864" if is_postgres() else "#1F3864"
     st.markdown(
         f"<div style='text-align:right; padding-top:1.2rem;'>"
-        f"<span style='background:#1F3864;color:white;padding:6px 12px;"
+        f"<span style='background:{color};color:white;padding:6px 12px;"
         f"border-radius:6px;font-size:0.85rem;'>{badge}</span></div>",
         unsafe_allow_html=True,
     )
@@ -70,7 +61,7 @@ with col_r:
 st.divider()
 
 # =====================================================================
-# SIDEBAR  — global filters
+# SIDEBAR — global filters
 # =====================================================================
 st.sidebar.header("🔎 Filters")
 
@@ -86,10 +77,9 @@ sel_genders = st.sidebar.multiselect("Gender", genders, default=genders)
 st.sidebar.divider()
 st.sidebar.markdown(
     "**About**  \n"
-    "Built on the GADMS PostgreSQL schema: 12 tables, 1,019 records, "
-    "fully constrained with referential integrity.  \n\n"
+    "GADMS schema: 12 tables, fully constrained with referential integrity.  \n\n"
     "**Tech**  \n"
-    "Streamlit · Plotly · pandas · PostgreSQL / DuckDB"
+    "Streamlit · Plotly · pandas · DuckDB"
 )
 
 
@@ -105,7 +95,7 @@ S_FILTER = _in_clause(sel_statuses)
 G_FILTER = _in_clause(sel_genders)
 
 STUDENT_WHERE = f"""
-  s.Status   IN {S_FILTER}
+  s.Status IN {S_FILTER}
   AND s.Gender IN {G_FILTER}
   AND p.ProgrammeName IN {P_FILTER}
 """
@@ -122,39 +112,35 @@ SELECT
    JOIN Programme p ON p.ProgrammeID=s.ProgrammeID
    WHERE {STUDENT_WHERE}) AS enrollments,
   (SELECT COUNT(*) FROM AssessmentResult) AS results,
-  (SELECT ROUND(AVG(0.4*CourseworkScore + 0.6*ExamScore)::numeric, 2)
+  (SELECT ROUND(AVG(0.4*CourseworkScore + 0.6*ExamScore)::DOUBLE, 2)
      FROM AssessmentResult) AS avg_mark,
   (SELECT COALESCE(SUM(Balance),0) FROM FeePayment) AS outstanding,
   (SELECT COUNT(*) FROM LMSActivity) AS lms_events
 """
-# DuckDB needs ::DOUBLE not ::numeric
-if get_connection()[0] == "duckdb":
-    kpi_sql = kpi_sql.replace("::numeric", "::DOUBLE")
 
 kpi = q(kpi_sql).iloc[0]
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("👥 Students", f"{int(kpi['Students']):,}")
-c2.metric("📚 Enrollments", f"{int(kpi['Enrollments']):,}")
-c3.metric("📝 Graded results", f"{int(kpi['Results']):,}")
+c1.metric("👥 Students",          f"{int(kpi['Students']):,}")
+c2.metric("📚 Enrollments",       f"{int(kpi['Enrollments']):,}")
+c3.metric("📝 Graded results",    f"{int(kpi['Results']):,}")
 c4.metric("📊 Avg weighted mark", f"{float(kpi['avg_mark']):.2f}")
 c5.metric("💰 Outstanding (GHS)", f"{float(kpi['Outstanding']):,.0f}")
-c6.metric("💻 LMS events", f"{int(kpi['lms_events']):,}")
+c6.metric("💻 LMS events",        f"{int(kpi['lms_events']):,}")
 
 st.divider()
 
 # =====================================================================
 # TABS
 # =====================================================================
-tab_o, tab_p, tab_l, tab_f, tab_d, tab_q = st.tabs(
-    ["📊 Overview", "🎯 Performance", "💻 LMS Engagement", "💰 Finance", "🗂️ Data Explorer", "🧪 Query Lab"]
-)
-
+tab_o, tab_p, tab_l, tab_f, tab_d, tab_q = st.tabs([
+    "📊 Overview", "🎯 Performance", "💻 LMS Engagement",
+    "💰 Finance", "🗂️ Data Explorer", "🧪 Query Lab"
+])
 
 # ---------- OVERVIEW ----------
 with tab_o:
     st.subheader("Programme & demographic mix")
-
     a, b = st.columns(2)
     with a:
         df = q(f"""
@@ -170,7 +156,6 @@ with tab_o:
         fig.update_layout(showlegend=False, coloraxis_showscale=False,
                           xaxis_title="", yaxis_title="Students")
         st.plotly_chart(fig, use_container_width=True)
-
     with b:
         df = q(f"""
             SELECT s.Gender, COUNT(*) AS Students
@@ -205,7 +190,7 @@ with tab_o:
             GROUP BY p.ProgrammeName, s.Gender
         """)
         fig = px.bar(df, x="ProgrammeName", y="n", color="Gender", barmode="stack",
-                     title="Programme × Gender",
+                     title="Programme x Gender",
                      color_discrete_sequence=["#1F3864", "#2E75B6", "#8FAADC"])
         fig.update_layout(xaxis_title="", yaxis_title="Students")
         st.plotly_chart(fig, use_container_width=True)
@@ -214,20 +199,18 @@ with tab_o:
 # ---------- PERFORMANCE ----------
 with tab_p:
     st.subheader("Academic performance")
-
     a, b = st.columns([2, 1])
     with a:
         df = q(f"""
             SELECT p.ProgrammeName,
-                   ROUND(AVG(0.4*ar.CourseworkScore + 0.6*ar.ExamScore)::{ 'DOUBLE' if get_connection()[0]=='duckdb' else 'numeric' }, 2) AS AvgMark,
+                   ROUND(AVG(0.4*ar.CourseworkScore + 0.6*ar.ExamScore)::DOUBLE, 2) AS AvgMark,
                    COUNT(*) AS Results
             FROM Programme p
-            JOIN Student s        ON p.ProgrammeID = s.ProgrammeID
-            JOIN Enrollment e     ON s.StudentID   = e.StudentID
+            JOIN Student s ON p.ProgrammeID = s.ProgrammeID
+            JOIN Enrollment e ON s.StudentID = e.StudentID
             JOIN AssessmentResult ar ON ar.EnrollmentID = e.EnrollmentID
             WHERE {STUDENT_WHERE}
-            GROUP BY p.ProgrammeName
-            ORDER BY AvgMark DESC
+            GROUP BY p.ProgrammeName ORDER BY AvgMark DESC
         """)
         fig = px.bar(df, x="ProgrammeName", y="AvgMark", text="AvgMark",
                      color="AvgMark", color_continuous_scale="Tealgrn",
@@ -236,7 +219,6 @@ with tab_p:
         fig.update_layout(yaxis_title="Avg mark", xaxis_title="",
                           coloraxis_showscale=False, yaxis_range=[0, 100])
         st.plotly_chart(fig, use_container_width=True)
-
     with b:
         df = q("""
             SELECT FinalGrade AS Grade, COUNT(*) AS Count
@@ -255,18 +237,16 @@ with tab_p:
 
     st.markdown("##### Coursework vs Exam — each dot is one assessment result")
     df = q(f"""
-        SELECT ar.CourseworkScore, ar.ExamScore, ar.FinalGrade,
-               p.ProgrammeName
+        SELECT ar.CourseworkScore, ar.ExamScore, ar.FinalGrade, p.ProgrammeName
         FROM AssessmentResult ar
         JOIN Enrollment e ON e.EnrollmentID = ar.EnrollmentID
-        JOIN Student s    ON s.StudentID = e.StudentID
-        JOIN Programme p  ON p.ProgrammeID = s.ProgrammeID
+        JOIN Student s ON s.StudentID = e.StudentID
+        JOIN Programme p ON p.ProgrammeID = s.ProgrammeID
         WHERE {STUDENT_WHERE}
     """)
     fig = px.scatter(df, x="CourseworkScore", y="ExamScore", color="FinalGrade",
                      symbol="ProgrammeName", opacity=0.75,
-                     color_discrete_sequence=px.colors.qualitative.Bold,
-                     title=None)
+                     color_discrete_sequence=px.colors.qualitative.Bold)
     fig.add_shape(type="line", x0=0, y0=50, x1=100, y1=50,
                   line=dict(color="grey", dash="dot"))
     fig.add_shape(type="line", x0=50, y0=0, x1=50, y1=100,
@@ -279,7 +259,6 @@ with tab_p:
 # ---------- LMS ----------
 with tab_l:
     st.subheader("LMS engagement vs outcome — early-warning view")
-
     df = q(f"""
         SELECT s.StudentID,
                s.FirstName || ' ' || s.LastName AS FullName,
@@ -289,33 +268,26 @@ with tab_l:
                COALESCE(SUM(l.DurationMinutes),0) AS Minutes,
                ar.FinalGrade
         FROM Student s
-        JOIN Programme p     ON p.ProgrammeID = s.ProgrammeID
-        JOIN Enrollment e    ON e.StudentID = s.StudentID
+        JOIN Programme p ON p.ProgrammeID = s.ProgrammeID
+        JOIN Enrollment e ON e.StudentID = s.StudentID
         JOIN CourseOffering co ON co.CourseOfferingID = e.CourseOfferingID
         LEFT JOIN LMSActivity l ON l.StudentID = s.StudentID
-                              AND l.CourseOfferingID = co.CourseOfferingID
+                               AND l.CourseOfferingID = co.CourseOfferingID
         LEFT JOIN AssessmentResult ar ON ar.EnrollmentID = e.EnrollmentID
         WHERE {STUDENT_WHERE}
         GROUP BY s.StudentID, s.FirstName, s.LastName, p.ProgrammeName,
                  co.CourseOfferingID, ar.FinalGrade
     """)
-
     a, b = st.columns(2)
     with a:
-        fig = px.scatter(
-            df, x="Minutes", y="Events", color="FinalGrade", size_max=14,
-            hover_data=["FullName", "ProgrammeName", "CourseOfferingID"],
-            color_discrete_sequence=px.colors.qualitative.Bold,
-            title="LMS minutes vs LMS events  (colour = final grade)"
-        )
+        fig = px.scatter(df, x="Minutes", y="Events", color="FinalGrade", size_max=14,
+                         hover_data=["FullName", "ProgrammeName", "CourseOfferingID"],
+                         color_discrete_sequence=px.colors.qualitative.Bold,
+                         title="LMS minutes vs LMS events (colour = final grade)")
         fig.update_layout(xaxis_title="Total minutes", yaxis_title="LMS events")
         st.plotly_chart(fig, use_container_width=True)
-
     with b:
-        atype = q("""
-            SELECT ActivityType, COUNT(*) AS n
-            FROM LMSActivity GROUP BY ActivityType ORDER BY n DESC
-        """)
+        atype = q("SELECT ActivityType, COUNT(*) AS n FROM LMSActivity GROUP BY ActivityType ORDER BY n DESC")
         fig = px.bar(atype, x="ActivityType", y="n", text="n",
                      color="n", color_continuous_scale="Purples",
                      title="Activity-type breakdown")
@@ -324,17 +296,14 @@ with tab_l:
                           xaxis_title="", yaxis_title="Events")
         st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("##### Top 15 by LMS minutes (potential at-risk if minutes high but grade low)")
-    st.dataframe(
-        df.sort_values("Minutes", ascending=False).head(15).reset_index(drop=True),
-        use_container_width=True, hide_index=True
-    )
+    st.markdown("##### Top 15 by LMS minutes")
+    st.dataframe(df.sort_values("Minutes", ascending=False).head(15).reset_index(drop=True),
+                 use_container_width=True, hide_index=True)
 
 
 # ---------- FINANCE ----------
 with tab_f:
     st.subheader("Fee governance")
-
     a, b = st.columns(2)
     with a:
         df = q("""
@@ -348,7 +317,6 @@ with tab_f:
         fig.update_layout(coloraxis_showscale=False,
                           xaxis_title="", yaxis_title="Total amount (GHS)")
         st.plotly_chart(fig, use_container_width=True)
-
     with b:
         out = q(f"""
             SELECT s.StudentID,
@@ -357,8 +325,8 @@ with tab_f:
                    SUM(f.AmountPaid) AS Paid,
                    SUM(f.Balance) AS Outstanding
             FROM Student s
-            JOIN Programme p   ON p.ProgrammeID = s.ProgrammeID
-            JOIN FeePayment f  ON f.StudentID   = s.StudentID
+            JOIN Programme p ON p.ProgrammeID = s.ProgrammeID
+            JOIN FeePayment f ON f.StudentID = s.StudentID
             WHERE {STUDENT_WHERE}
             GROUP BY s.StudentID, s.FirstName, s.LastName, p.ProgrammeName
             HAVING SUM(f.Balance) > 0
@@ -367,8 +335,8 @@ with tab_f:
         st.markdown("##### Students with outstanding balances")
         st.dataframe(out, use_container_width=True, hide_index=True,
                      column_config={
-                        "Paid": st.column_config.NumberColumn(format="GHS %.2f"),
-                        "Outstanding": st.column_config.NumberColumn(format="GHS %.2f"),
+                         "Paid": st.column_config.NumberColumn(format="GHS %.2f"),
+                         "Outstanding": st.column_config.NumberColumn(format="GHS %.2f"),
                      })
 
 
@@ -383,7 +351,7 @@ with tab_d:
     st.caption(f"{len(df):,} rows  ·  {len(df.columns)} columns")
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button(
-        f"⬇️ Download {pick}.csv",
+        f"Download {pick}.csv",
         df.to_csv(index=False).encode(),
         file_name=f"{pick}.csv",
         mime="text/csv",
@@ -393,23 +361,18 @@ with tab_d:
 # ---------- QUERY LAB ----------
 with tab_q:
     st.subheader("Run your own SQL")
-    st.caption(
-        "Read-only. Backed by your live GADMS database. Use this to demo "
-        "ad-hoc analytics during an interview."
-    )
-
+    st.caption("Read-only. Backed by your live GADMS database.")
     default_query = """SELECT p.ProgrammeName,
        ROUND(AVG(0.4*ar.CourseworkScore + 0.6*ar.ExamScore), 2) AS AvgMark,
        COUNT(*) AS Results
 FROM Programme p
-JOIN Student s        ON p.ProgrammeID = s.ProgrammeID
-JOIN Enrollment e     ON s.StudentID   = e.StudentID
+JOIN Student s ON p.ProgrammeID = s.ProgrammeID
+JOIN Enrollment e ON s.StudentID = e.StudentID
 JOIN AssessmentResult ar ON ar.EnrollmentID = e.EnrollmentID
 GROUP BY p.ProgrammeName
 ORDER BY AvgMark DESC;"""
-
     sql_input = st.text_area("SQL", value=default_query, height=180)
-    if st.button("▶ Run", type="primary"):
+    if st.button("Run", type="primary"):
         sql = sql_input.strip().rstrip(";")
         forbidden = ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER",
                      "TRUNCATE", "CREATE", "GRANT", "REVOKE")
@@ -429,7 +392,6 @@ ORDER BY AvgMark DESC;"""
 # =====================================================================
 st.divider()
 st.caption(
-    "Built by the GADMS team · DSCD 606 Data Management Techniques · "
-    "University of Ghana · Data: 100 students, 302 enrolments, 302 results, "
-    "100 payments, 500 LMS events"
+    "GADMS team · DSCD 606 Data Management Techniques · "
+    "University of Ghana · MPhil Data Science 2026"
 )
